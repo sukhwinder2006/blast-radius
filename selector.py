@@ -2,12 +2,14 @@
 """Coverage-guided test selector for SQLGlot."""
 
 import json
+import re
 import shlex
 import sys
 from pathlib import Path, PurePosixPath
 
 DATA = Path("/data")
 COVERAGE_FILE = Path("/app/coverage_map.json")
+FUNCTION_COVERAGE_FILE = Path("/app/function_coverage.json")
 
 MAX_WORKERS = 8
 WORKER_COST = 2.0
@@ -100,6 +102,36 @@ def is_comment_only(patch_path):
 
     return found_change
 
+
+def changed_hunks(patch_path):
+    """Return original source line ranges changed by a patch."""
+    result = {}
+    current_path = None
+
+    try:
+        for line in patch_path.read_text(errors="replace").splitlines():
+            if line.startswith("diff --git "):
+                current_path = None
+
+            elif line.startswith("--- a/"):
+                current_path = line[6:]
+
+            elif line.startswith("@@ ") and current_path:
+                match = re.match(
+                    r"@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@",
+                    line
+                )
+                if match:
+                    result.setdefault(current_path, []).append(
+                        (int(match.group(1)), int(match.group(2) or 1))
+                    )
+
+    except Exception:
+        return {}
+
+    return result
+
+
 def schedule(selected, test_by_number):
     """Find the cheapest LPT distribution across 1 to 8 workers."""
     if not selected:
@@ -134,6 +166,9 @@ def schedule(selected, test_by_number):
 def main():
     tests = json.loads((DATA / "tests.json").read_text())["tests"]
     coverage = json.loads(COVERAGE_FILE.read_text())
+    function_tests = json.loads(
+        FUNCTION_COVERAGE_FILE.read_text()
+    )["function_tests"]
 
     test_by_number = {t["number"]: t for t in tests}
     test_by_id = {t["id"]: t["number"] for t in tests}
@@ -158,6 +193,7 @@ def main():
 
     for patch in patches:
         paths = changed_paths(patch)
+        hunks_by_path = changed_hunks(patch)
         selected = set()
         fallback = False
 
@@ -211,9 +247,46 @@ def main():
                 elif path.startswith("sqlglotc/") or path in BUILD_FILES:
                     selected.update({1565, 1566, 1567})
 
-                # Direct source-file coverage.
+                # Prefer function-level coverage for changed source code.
+                # Fall back to whole-file coverage whenever mapping is uncertain.
                 elif path in file_tests:
-                    selected.update(file_tests[path])
+                    ranges = hunks_by_path.get(path, [])
+                    entries = function_tests.get(path, [])
+                    function_selected = set()
+                    mapping_safe = bool(ranges and entries)
+
+                    if mapping_safe:
+                        for old_start, old_count in ranges:
+                            if old_count == 0:
+                                changed_lines = {
+                                    max(1, old_start - 1),
+                                    max(1, old_start),
+                                }
+                            else:
+                                changed_lines = range(
+                                    old_start,
+                                    old_start + old_count,
+                                )
+
+                            matches = [
+                                entry for entry in entries
+                                if any(
+                                    entry[0] <= line <= entry[1]
+                                    for line in changed_lines
+                                )
+                            ]
+
+                            if not matches:
+                                mapping_safe = False
+                                break
+
+                            for entry in matches:
+                                function_selected.update(entry[2])
+
+                    if mapping_safe and function_selected:
+                        selected.update(function_selected)
+                    else:
+                        selected.update(file_tests[path])
 
                 # An unknown Python/source file is unsafe to ignore.
                 elif (

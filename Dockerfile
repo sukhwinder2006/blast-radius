@@ -4,5 +4,6 @@ WORKDIR /app
 
 COPY selector.py /app/selector.py
 COPY coverage_map.json /app/coverage_map.json
+COPY function_coverage.json /app/function_coverage.json
 
 CMD ["python", "/app/selector.py"]
