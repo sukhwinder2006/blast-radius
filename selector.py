@@ -118,7 +118,7 @@ def changed_hunks(patch_path):
 
             elif line.startswith("@@ ") and current_path:
                 match = re.match(
-                    r"@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@",
+                    r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
                     line
                 )
                 if match:
@@ -197,18 +197,6 @@ def main():
         selected = set()
         fallback = False
 
-        # Comment-only patches cannot change test behavior.
-        if is_comment_only(patch):
-            workers = []
-            print(
-                json.dumps({
-                    "commit": patch.stem,
-                    "workers": workers,
-                })
-            )
-            print(f"{patch.stem}: 0 tests (comment-only)", file=sys.stderr)
-            continue
-
         if paths is None:
             selected = set(test_by_number)
             fallback = True
@@ -253,7 +241,7 @@ def main():
                     ranges = hunks_by_path.get(path, [])
                     entries = function_tests.get(path, [])
                     function_selected = set()
-                    mapping_safe = bool(ranges and entries)
+                    mapping_safe = bool(ranges and entries) and path != "sqlglot/serde.py"
 
                     if mapping_safe:
                         for old_start, old_count in ranges:
